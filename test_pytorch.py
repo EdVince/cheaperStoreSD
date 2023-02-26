@@ -3,7 +3,7 @@ from torch.nn.parameter import Parameter
 
 from diffusers import StableDiffusionPipeline
 
-pipe = StableDiffusionPipeline.from_pretrained("chilloutmix", torch_dtype=torch.float16)
+pipe = StableDiffusionPipeline.from_pretrained("../chilloutmix", torch_dtype=torch.float16)
 pipe = pipe.to("cuda")
 
 def generate(filename):
