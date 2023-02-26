@@ -21,6 +21,7 @@
 #include <set>
 #include <vector>
 
+#include <iostream>
 #include <bitset>
 
 // ncnn public header
@@ -246,6 +247,10 @@ public:
 
     int storage_group;
     int storage_binary;
+
+    long long fp32_count;
+    long long fp16_count;
+    long long quan_count;
 
     int gen_random_weight;
 
@@ -654,22 +659,28 @@ int ModelWriter::fwrite_weight_tag_data(const ncnn::Mat& data, FILE* bp, float a
         else if (storage_type == 2)
         {
 
-            const int tag = 0x01306B50; // int magic
+            int flag = false;
+
+            const int tag = 0x01306B50;
             fwrite(&tag, sizeof(int), 1, bp);
             fwrite(&storage_group, sizeof(int), 1, bp);
             fwrite(&storage_binary, sizeof(int), 1, bp);
 
             int num_groups = data_flattened.w / storage_group;
-            std::bitset<10000> tmp_data;
-            unsigned char* uchar_data = (unsigned char*)ncnn::fastMalloc(sizeof(unsigned char) * storage_group);
-            unsigned char* compress_data = (unsigned char*)ncnn::fastMalloc(sizeof(unsigned char) * storage_group * storage_binary / 8);
             for (int group = 0; group < num_groups; group++)
             {
+                unsigned char* uchar_data = (unsigned char*)ncnn::fastMalloc(sizeof(unsigned char) * storage_group);
+                unsigned char* compress_data = (unsigned char*)ncnn::fastMalloc(sizeof(unsigned char) * storage_group * storage_binary / 8);
+                unsigned char* tmp_data = (unsigned char*)ncnn::fastMalloc(sizeof(unsigned char) * storage_group * storage_binary);
+                memset(uchar_data, 0, sizeof(unsigned char) * storage_group);
+                memset(compress_data, 0, sizeof(unsigned char) * storage_group * storage_binary / 8);
+                memset(tmp_data, 0, sizeof(unsigned char) * storage_group * storage_binary);
+
                 float* float_data = (float*)data_flattened.data + group * storage_group;
 
                 // quan
-                float int_min = FLT_MIN;
-                float int_max = FLT_MAX;
+                float int_min = FLT_MAX;
+                float int_max = FLT_MIN;
                 for (int i = 0; i < storage_group; i++)
                 {
                     int_min = std::min(int_min, float_data[i]);
@@ -683,7 +694,7 @@ int ModelWriter::fwrite_weight_tag_data(const ncnn::Mat& data, FILE* bp, float a
                 // compreass
                 for (int i = 0, p = 0; i < storage_group; i++) {
                     for (int j = storage_binary - 1; j >= 0; j--) {
-                        tmp_data.set(p++, ((uchar_data[i] & (1 << j)) > 0) ? 1 : 0);
+                        tmp_data[p++] = ((uchar_data[i] & (1 << j)) > 0) ? 1 : 0;
                     }
                 }
                 for (int i = 0, p = 0; i < storage_binary * storage_group / 8; i++) {
@@ -695,10 +706,15 @@ int ModelWriter::fwrite_weight_tag_data(const ncnn::Mat& data, FILE* bp, float a
                 fwrite(&int_min, sizeof(float), 1, bp);
                 fwrite(&int_max, sizeof(float), 1, bp);
                 fwrite(compress_data, sizeof(unsigned char), storage_group * storage_binary / 8, bp);
-            }
-            ncnn::fastFree(uchar_data);
-            ncnn::fastFree(compress_data);
 
+                ncnn::fastFree(uchar_data);
+                ncnn::fastFree(compress_data);
+                ncnn::fastFree(tmp_data);
+            }
+
+            fp32_count += 4*data_flattened.w;
+            fp16_count += 2*data_flattened.w;
+            quan_count += num_groups * storage_group * storage_binary / 8;
             printf("%d,%d,%d\n",4*data_flattened.w,2*data_flattened.w,num_groups * storage_group * storage_binary / 8);
         }
         else
@@ -960,8 +976,10 @@ int ModelWriter::save(const char* parampath, const char* binpath)
             }
             fprintf_param_value(" 19=%d", dynamic_weight)
 
+            storage_type = 2;
             fwrite_weight_tag_data(op->weight_data, bp);
             fwrite_weight_data(op->bias_data, bp);
+            storage_type = 1;
 
 #if NCNN_INT8
             // write int8_scale data
@@ -1999,6 +2017,8 @@ int ModelWriter::save(const char* parampath, const char* binpath)
             fprintf_param_value(" 3=%d", kdim)
             fprintf_param_value(" 4=%d", vdim)
 
+            storage_type = 2;
+
             fwrite_weight_tag_data(op->q_weight_data, bp);
             fwrite_weight_data(op->q_bias_data, bp);
             fwrite_weight_tag_data(op->k_weight_data, bp);
@@ -2007,6 +2027,8 @@ int ModelWriter::save(const char* parampath, const char* binpath)
             fwrite_weight_data(op->v_bias_data, bp);
             fwrite_weight_tag_data(op->out_weight_data, bp);
             fwrite_weight_data(op->out_bias_data, bp);
+
+            storage_type = 1;
         }
         else if (layer->type == "MVN")
         {
@@ -2515,12 +2537,18 @@ int main(int argc, char** argv)
     int binary = atoi(argv[6]);
 
     NetOptimize optimizer;
-    optimizer.storage_type = 2;
+    optimizer.storage_type = 1;
     optimizer.storage_group = group;
     optimizer.storage_binary = binary;
+    optimizer.fp32_count = 0;
+    optimizer.fp16_count = 0;
+    optimizer.quan_count = 0;
+
     optimizer.load_param(inparam);
     optimizer.load_model(inbin);
     optimizer.save(outparam, outbin);
+
+    printf("fp32:%dMB, fp16:%dMB, quan:%dMB\n", optimizer.fp32_count/1024/1024, optimizer.fp16_count/1024/1024, optimizer.quan_count/1024/1024);
 
     return 0;
 }
